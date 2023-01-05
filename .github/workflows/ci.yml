@@ -1,0 +1,111 @@
+name: CI
+
+on: [push]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    env:
+      TEST_USER: testuser
+      TEST_PASSWORD: testpass
+      TEST_MESSAGE: test message
+      TEST_TOPIC: test/topic
+
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@v3
+
+      - name: Set the image tag
+        run: >
+          echo
+          "IMAGE_TAG=mosqitto-dev:$GITHUB_RUN_ID-$GITHUB_RUN_NUMBER-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
+          >>
+          $GITHUB_ENV
+
+      - name: Build a test Docker image
+        uses: docker/build-push-action@v3
+        with:
+          context: .
+          tags: ${{ env.IMAGE_TAG }}
+          build-args: |
+            username=${{ env.TEST_USER }}
+            password=${{ env. TEST_PASSWORD }}
+
+      - name: Start a test container
+        run: >
+          echo
+          "TEST_CONTAINER_ID=$(docker run -d --rm -p 1883:1883 -p 8883:8883 $IMAGE_TAG)"
+          >>
+          $GITHUB_ENV
+
+      - name: Install an MQTT client
+        run: sudo apt-get install mosquitto-clients
+
+      - name: Publish a test message
+        run: mosquitto_pub -h localhost -p 1883 -u $TEST_USER -P $TEST_PASSWORD -t $TEST_TOPIC -m "$TEST_MESSAGE" -d -r
+
+      - name: Receive and verify the test message
+        run: >
+          test
+          "$(mosquitto_sub -h localhost -p 1883 -u $TEST_USER -P $TEST_PASSWORD -t $TEST_TOPIC -C 1 -v)"
+          =
+          "$TEST_TOPIC $TEST_MESSAGE"
+
+      - name: Receive and verify the test message (SSL)
+        run: >
+          test
+          "$(mosquitto_sub -h localhost -p 8883 -u $TEST_USER -P $TEST_PASSWORD -t $TEST_TOPIC -C 1 -v --cafile config/certs/ca.crt --insecure)"
+          =
+          "$TEST_TOPIC $TEST_MESSAGE"
+
+      - name: Stop the test container
+        run: docker stop $TEST_CONTAINER_ID
+
+  publish-image:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: read
+      packages: write
+
+    env:
+      IMAGE_NAME: ${{ github.repository }}
+      REGISTRY: ghcr.io
+      TEST_USER: testuser
+      TEST_PASSWORD: testpass
+
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@v3
+
+      - name: Set the version
+        run: echo "VERSION=v$(date -u +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ env.VERSION }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v3
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            username=mqttuser
+            password=mqttpass
